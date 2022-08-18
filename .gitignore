@@ -1,0 +1,10 @@
+'node_modules' 
+node_modules
+played_songs.xlsx
+secret.json
+lastfm.json
+.vs/ProjectSettings.json
+.vs/slnx.sqlite
+.vs/VSWorkspaceState.json
+.vs/PaulBot/v15/.suo
+code/spreadsheet.js
