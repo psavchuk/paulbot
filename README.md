@@ -1,6 +1,12 @@
 # Paulbot
 Another discord bot for playing music
 
+- [Features](#features)
+- [Set Up](#set-up)
+- [Using the Bot](#using-the-bot)
+- [Skills Learned](#skills-learned)
+- [Plans](#plans)
+
 ![image](https://user-images.githubusercontent.com/38636939/185458538-fb30bbfe-b7dd-48f2-8a4e-ee1ddc6b62e3.png)
 
 ## Features
@@ -25,6 +31,9 @@ Another discord bot for playing music
 - Default prefix for running commands is `<3`, config is located in the config.json folder
 - Example command to play a song `<3play https://www.youtube.com/watch?v=DmNfT-B7nlA`
 - All commands are `play`, `join`, `leave`, `pause`, `resume`, `skip`, `clear`
+
+## Skills Learned
+- NodeJS, Javascript, SQL
 
 ## Plans
 - 'Surprise Me' button to pick songs from database
