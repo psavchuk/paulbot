@@ -5,11 +5,15 @@ class HelperFunctions {
     //https://stackoverflow.com/a/3733257
     secondsToMinutes(timeInSeconds) {
         timeInSeconds = Number(timeInSeconds);
-        const hours = Math.floor(timeInSeconds / 3600);
+        let hours = (Math.floor(timeInSeconds / 3600)).toFixed(0);
         timeInSeconds = timeInSeconds - hours * 3600;
 
-        let minutes = (timeInSeconds / 60).toFixed(0);
-        let seconds = (timeInSeconds % 60).toFixed(0);
+        let minutes = ((timeInSeconds / 60) - 1).toFixed(0);
+        let seconds = ((timeInSeconds % 60)).toFixed(0);
+
+        if(hours.length === 1) {
+            hours = "0" + hours;
+        }
 
         if(minutes.length === 1) {
             minutes = "0" + minutes;
@@ -19,7 +23,10 @@ class HelperFunctions {
             seconds = "0" + seconds;
         }
 
-        return String(hours + ":" + minutes + ":" + seconds);
+        if(hours === "00")
+            return String(minutes + ":" + seconds);
+        else
+            return String(hours + ":" + minutes + ":" + seconds);
         //return String(timeInSeconds / 60).charAt(0) + ":" + seconds;
     }
     
