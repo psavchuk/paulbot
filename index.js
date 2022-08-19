@@ -54,22 +54,11 @@ const mySQLConnection = mysql.createConnection({
     database : 'paulbot_db'
 });
 
-const queue = [];
-const player = createAudioPlayer();
-let playerStatus = AudioPlayerStatus.Idle;
-let channel; // stores discord text channel
-let voiceChannel; // stores discord voice channel
+const connections = new Map();
 
-
-let currentSong; // stores current song for looping purposes
-let pauseEnabled = false; //whether current song is paused or not
-let loopEnabled = false; //whether current song will be looped or not
-let autoplayEnabled = false;
-
-const autoplayMaxLength = 1; //length of autoplay playlist
+const autoplayMaxLength = 50; //length of autoplay playlist
 const maxAutoplaySongLength = 600; //max length of a song before we skip it (so we don't get hour long loops, etc)
 
-let autoplaySongs = [];
 let autoplaySimilarityThreshold = 0.75;
 let autoplayOriginalSong; //stores the song our autoplay is based off of
 const autoplayWordBlacklist = ["live", "performance", "gma", "show", "perform", "late", "react", "award", "gameplay", "saber", "album", "hour", "ceremony", "fmv", "cinematic", "new", "mv"]; //stores words that should be skipped by autoplay
@@ -79,11 +68,7 @@ const bracketRegex = new RegExp(/\[([^\[\]]+)\]/, 'g');
 const videoIdRegex = new RegExp(/(?<=v=\s*).*?(?=\s*&)/, 'g');
 const titleRegexList = ["music", "lyric", "video", "official"];
 
-let playedSongs = []; //stores names of played songs for autoplay to compare against
-let playedSongsLength = 50; //max length of played songs before we stop storing (don't want to store too many for memory sake)
-
-let currentPlayingMessage; // stores variable for the message with controls
-let currentSearchingMessage; // stores variable for the 'searching' message
+const playedSongsLength = 50; //max length of played songs before we stop storing (don't want to store too many for memory sake)
 
 const autoplayButtonID = 2;
 const playButtonID = 0;
@@ -92,52 +77,10 @@ const clearButtonID = 1;
 
 let playSongAttempts = 0;
 
-// youtube mix autoplay variables
-let ytmixIndex = -1;
 let maxytmixIndex = 50;
-let mixPlaylist;
-
-const headerRow = new MessageActionRow().addComponents([new MessageButton()
-                                                            .setCustomId('play')
-                                                            .setLabel('Pause')
-                                                            .setStyle('SECONDARY'),
-                                                        new MessageButton()
-                                                            .setCustomId('skip')
-                                                            .setLabel('Skip')
-                                                            .setStyle('SECONDARY'),
-                                                        new MessageButton()
-                                                            .setCustomId('autoplay')
-                                                            .setLabel('Enable Autoplay')
-                                                            .setStyle('SECONDARY'),
-                                                        new MessageButton()
-                                                            .setCustomId('favorite')
-                                                            .setEmoji('❤️')
-                                                            .setStyle('SECONDARY'),
-                                                        new MessageButton()
-                                                            .setCustomId('more')
-                                                            .setLabel('. . .')
-                                                            .setStyle('SECONDARY')
-                                                        ]);
-
-const moreRow = new MessageActionRow()
-                        .addComponents([
-                            new MessageButton()
-                                .setCustomId('loop')
-                                .setLabel('Start Loop')
-                                .setStyle('SECONDARY'),
-                            new MessageButton()
-                                .setCustomId('clear')
-                                .setLabel('Clear Queue')
-                                .setStyle('DANGER'),
-                            new MessageButton()
-                                .setCustomId('less')
-                                .setLabel('. . .')
-                                .setStyle('SUCCESS')
-                        ]);
 
 const embedColor = '#ffffff'; //used to change color of the embed
 const baseEmbed = new MessageEmbed().setColor(embedColor); //the embed we change for every new song
-const autoplayEmbed = new MessageEmbed().setColor(embedColor);
 
 //initial client commands
 client.once('ready', () => {
@@ -171,22 +114,18 @@ client.on('messageCreate', async message => {
 
     if (!content.startsWith(prefix)) return;
 
-    if(!channel)
-        channel = message.channel;
-
     if(content.startsWith(`${prefix}join`)) //join command
     {
         if(message.member.voice.channel) //if in channel
         {
-            voiceChannel = message.member.voice.channel;
-            join(voiceChannel);
+            join(message.member.voice.channel, message);
         }
         return;
     }
 
     if(content.startsWith(`${prefix}leave`)) //leave command
     {
-        leave();
+        leave(message.guild.id);
         return;
     }
 
@@ -216,11 +155,12 @@ client.on('messageCreate', async message => {
 
     if(content.startsWith(`${prefix}play`)) //play command
     {
+        const connection = connections.get(message.guild.id);
         // join the channel if we are not in it already
-        if(message.member.voice.channel !== voiceChannel)
+        if(message.member.voice.channel !== connection?.voiceChannel || !connection?.voiceChannel)
         {
-            voiceChannel = message.member.voice.channel;
-            join(voiceChannel);
+            console.log(" joining you dawg ");
+            join(message.member.voice.channel, message);
         }
 
         play(message);
@@ -228,31 +168,90 @@ client.on('messageCreate', async message => {
     }
 });
 
-async function join(channel) {
-    // establish voice connection
-    connection = joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
+async function join(voiceChannel, message) {
+    const _connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: voiceChannel.guild.id,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     });
 
-    baseEmbed.setThumbnail(channel.guild.iconURL());
+    const guildConnection = {
+        connection: _connection,
+        player: createAudioPlayer(),
+        message: null,
+        features: {
+            loopEnabled: false,
+            autoplayEnabled: false,
+        },
+        textChannel: message.channel,
+        voiceChannel: voiceChannel,
+        currentSong: null,
+        queue: [],
+        autoplayQueue: [],
+        playedSongs: [],
+        playerStatus: AudioPlayerStatus.Idle,
+        embed: new MessageEmbed().setColor(embedColor).setThumbnail(voiceChannel.guild.iconURL()),
+        rowOne: new MessageActionRow().addComponents([
+            new MessageButton()
+                .setCustomId('play')
+                .setLabel('Pause')
+                .setStyle('SECONDARY'),
+            new MessageButton()
+                .setCustomId('skip')
+                .setLabel('Skip')
+                .setStyle('SECONDARY'),
+            new MessageButton()
+                .setCustomId('autoplay')
+                .setLabel('Enable Autoplay')
+                .setStyle('SECONDARY'),
+            new MessageButton()
+                .setCustomId('favorite')
+                .setEmoji('❤️')
+                .setStyle('SECONDARY'),
+            new MessageButton()
+                .setCustomId('more')
+                .setLabel('. . .')
+                .setStyle('SECONDARY')
+        ]),
+        rowTwo: new MessageActionRow().addComponents([
+            new MessageButton()
+                .setCustomId('loop')
+                .setLabel('Start Loop')
+                .setStyle('SECONDARY'),
+            new MessageButton()
+                .setCustomId('clear')
+                .setLabel('Clear Queue')
+                .setStyle('DANGER'),
+            new MessageButton()
+                .setCustomId('less')
+                .setLabel('. . .')
+                .setStyle('SUCCESS')
+        ])
+    };
+
+    connections.set(voiceChannel.guild.id, guildConnection);
+    subscribeToPlayerEvents(voiceChannel.guild.id);
 }
 
-async function leave() {
-    if(typeof connection !== 'undefined') //if connection exists
+async function leave(guildId) {
+    const connection = connections.get(guildId);
+    if(typeof connection?.connection !== 'undefined') //if connection exists
     {
-        playerStatus = AudioPlayerStatus.Idle;
-        connection.destroy();
+        connection.playerStatus = AudioPlayerStatus.Idle;
+        connection.connection.destroy();
+        connections.delete(guildId); // might be too extreme?
     }
 }
 
-async function autoplaySelector(song, mode="youtube-mix") {
-    if(!autoplayEnabled)
+async function autoplaySelector(guildId, song, mode="youtube-mix") {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    if(!connection.features.autoplayEnabled)
         return;
 
-    if(autoplaySongs.length >= autoplayMaxLength)
-        autoplaySongs.shift();
+    if(connection.autoplayQueue.length >= autoplayMaxLength)
+        connection.autoplayQueue.shift();
 
     if(mode == "lastfm") {
         let related_tracks;
@@ -287,7 +286,7 @@ async function autoplaySelector(song, mode="youtube-mix") {
                 const _track = _tracks[randomNum];
 
                 // try to add song to autoplay queue
-                const result = await addAutoplaySong(_track);
+                const result = await addAutoplaySong(guildId, _track);
 
                 if(result == true) {
                     return;
@@ -302,77 +301,47 @@ async function autoplaySelector(song, mode="youtube-mix") {
     }
 
     if (mode == "youtube-mix") {
-        // when index is -1 we know that we need a new mix / playlist
-        if(ytmixIndex == -1) {
-            if (song.url && song.mode == "ytdl") {
-                autoplayOriginalSong = song;
-                mixPlaylist = await ytmix(song.url, { hl: 'en', gl: 'US' });
-            }
-
-            ytmixIndex = 0;
-        }
+        const mixPlaylist = await ytmix(song.url, { hl: 'en', gl: 'US' });
 
         if(mixPlaylist) {
-            maxytmixIndex = mixPlaylist.items.length - 1;
-            ytmixIndex ++;
+            for (let i = 0; i < mixPlaylist.items.length; i++) {
+                const element = mixPlaylist.items[i];
+            
+                const title = titleClear(element.title.toLowerCase());
+        
+                // if(autoplayCheckBlacklist(title, "")) //skips over if word is on blacklist
+                //     continue;
+        
+                if(checkForPlayedSong(guildId, title))
+                    continue;
+    
+                // check again if the list is too long
+                if (connection.autoplayQueue.length >= autoplayMaxLength)
+                    connection.autoplayQueue.shift();
 
-            // if we've reached end of items
-            if(ytmixIndex >= maxytmixIndex || typeof mixPlaylist.items[ytmixIndex] === 'undefined') 
-            {
-                console.log("reached end of playlist");
-                
-                const mixSong = mixPlaylist.items[ytmixIndex - 1];
-                ytmixIndex = -1;
-
-                autoplaySelector({
-                    url: mixSong.id,
+                // adds song to autoplay list
+                connection.autoplayQueue.push({
+                    url: element.id, 
                     mode: "ytdl",
-                    name: mixSong.title,
+                    name: title,
                     artist: "",
                 });
 
-                return;
-            }
-                
-            const mixSong = mixPlaylist.items[ytmixIndex];
-
-            if(checkForPlayedSong(mixSong.title)) {
-                // the song has been played already, try again
-                autoplaySelector({
-                    url: mixSong.id,
-                    mode: "ytdl",
-                    name: mixSong.title,
-                    artist: "",
-                });
-
-                return;
-            }
-            else {
-                // we have found a new song yay
-                // store it in sql database
                 if(sqlEnabled)
                 {
                     const _date = new Date();
-
-                    // first add the song to `songs` table if its not there already
-                    addSongToDatabase(mixSong.id, mixSong.title, mixSong.author.name, _date);
-                    // then add the song to `songs autoplayed` table
-                    addAutoplayedSongToDatabase(mixSong.id, autoplayOriginalSong.url, _date);
-                    // then update last played 
-                    updateSongLastPlayedDatabase(mixSong.id, _date);
-                    // then update times played
-                    updateSongTimesPlayedDatabase(mixSong.id, true);
-                }
-                // then push it to our queue
-                autoplaySongs.push({
-                    url: mixSong.id,
-                    mode: "ytdl",
-                    name: mixSong.title,
-                    artist: "",
-                });
     
-                return;
+                    // // first add the song to `songs` table if its not there already
+                    // addSongToDatabase(element.id, element.title, element.author.name, _date);
+                    // // then add the song to `songs autoplayed` table
+                    // // addAutoplayedSongToDatabase(element.id, element.url, _date);
+                    // // then update last played 
+                    // updateSongLastPlayedDatabase(element.id, _date);
+                    // // then update times played
+                    // updateSongTimesPlayedDatabase(element, true);
+                }
             }
+            return;
         }
     }
 
@@ -393,47 +362,50 @@ async function autoplaySelector(song, mode="youtube-mix") {
         if(element.length_seconds <= maxAutoplaySongLength) {         
             console.log("title of autoplay song: ", title);  
 
-            if(checkForPlayedSong(title)) {
+            if(checkForPlayedSong(guildId, title)) {
                 console.log("has song been played already");
                 continue;
             }
 
             // check again if the list is too long
-            if (autoplaySongs.length >= autoplayMaxLength)
-                autoplaySongs.shift();
+            if (connection.autoplayQueue.length >= autoplayMaxLength)
+                connection.autoplayQueue.shift();
 
             // adds song to autoplay list
-            autoplaySongs.push({
+            connection.autoplayQueue.push({
                 url: element.id, 
                 mode: "ytdl",
                 name: title,
                 artist: "",
             });
+
             break;
         }
-
     }
 
 }
 
-async function addAutoplaySong(_track) {
+async function addAutoplaySong(guildId, _track) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
     const title = _track.name;
     const author = _track.artist.name;
     
-    if(checkForPlayedSong(title)) {
+    if(checkForPlayedSong(guildId, title)) {
         console.log("has song been played already");
         return false;
     }
 
     console.log("title of autoplay song: ", title);  
 
-    if (autoplaySongs.length >= autoplayMaxLength)
-        autoplaySongs.shift();
+    if (connection.autoplayQueue.length >= autoplayMaxLength)
+        connection.autoplayQueue.shift();
 
     const trackInfo = await youtubesr.searchOne(`${author} ${title}`);
 
     if(trackInfo) {
-        autoplaySongs.push({
+        connection.autoplayQueue.push({
             url: trackInfo.id,
             mode: "ytdl",
             name: title,
@@ -533,13 +505,16 @@ async function play(message) {
         return;
     }
 
-    currentSearchingMessage = await message.channel.send(`${client.user.username}` + ' is searching for your request...');
+    // @TODO add some sort of feedback to user
+    // currentSearchingMessage = await message.channel.send(`${client.user.username}` + ' is searching for your request...');
 
     let songInfo;
+    let isURL = false;
 
     // handle links
     //check if url or not
     if(hlprFncs.isValidHttpUrl(searchQuery)) {
+        isURL = true;
         //#region soundcloud links
         if(searchQuery.includes('soundcloud.com')) //could be better way of checking if it is soundcloud
         {
@@ -547,9 +522,9 @@ async function play(message) {
                 songInfo = await scdl.getInfo(searchQuery);
 
                 if(songInfo) {
-                    if (currentSearchingMessage) {
-                        currentSearchingMessage.delete(); //replace our search message
-                    }
+                    // if (currentSearchingMessage) {
+                    //     currentSearchingMessage.delete(); //replace our search message
+                    // }
                     
                     message.channel.send(`${client.user.username}` + ' found ' + "**" + `${songInfo.title}` + "**");
 
@@ -596,11 +571,29 @@ async function play(message) {
     }
     else //not a link 
     {
+        isURL = false;
         console.log("invalid url, searching for query");
     }
 
     try {
-        const results = await youtubesr.searchOne(searchQuery);
+        // if it is url we use more reliable ytdl for info
+        // if not we search youtube for the query
+        let results;
+
+        if(isURL)
+        {
+            const ytdlQuery = await ytdl.getInfo(searchQuery);
+            results = {
+                id: ytdlQuery.videoDetails.videoId,
+                title: ytdlQuery.videoDetails.title,
+                channel: {
+                    name: ytdlQuery.videoDetails.ownerChannelName
+                }
+            };
+        }
+        else 
+            results = await youtubesr.searchOne(searchQuery);
+
         songInfo = results;
     } catch (error) {
         console.log(console.log("error searching youtube for song"), error);
@@ -610,14 +603,13 @@ async function play(message) {
         if(songInfo) {
             // dataSheet.AddRow(songInfo.id, songInfo.title, songInfo.channel.name, new Date().toLocaleDateString(), message.author.username, message.author.id);
             if(sqlEnabled) {
+                //@TODO add guild tracking here
                 const _date = new Date();
                 // store song that played
                 addSongToDatabase(songInfo.id, songInfo.title, songInfo.channel?.name, _date);
                 // update last time this song has been played
                 updateSongLastPlayedDatabase(songInfo.id, _date);
                 updateSongTimesPlayedDatabase(songInfo.id);
-
-                console.log(parseInt(message.author.id));
 
                 // below code removed for privacy reasons
                 // store user that played
@@ -643,19 +635,27 @@ async function play(message) {
 
             message.channel.send(`${client.user.username}` + ' found ' + "**" + `${songInfo.title}` + "**");
 
-            if (currentSearchingMessage) {
-                currentSearchingMessage.delete();
-            }
+            // delete search message to lower channel bloat
+            // if (currentSearchingMessage) {
+            //     currentSearchingMessage.delete();
+            // }
 
-            queue.push({
-                url: songInfo.id,
-                mode: "ytdl",
-                name: titleClear(songInfo.title),
-                artist: "",
-            });
+            const connection = connections.get(message.guild.id);
 
-            if(playerStatus == AudioPlayerStatus.Idle){
-                skip(); //cheaty code
+            if(connection) {
+                // reset autoplay queue
+                connection.autoplayQueue.length = 0;
+                connection.queue.push
+                ({
+                    url: songInfo.id,
+                    mode: "ytdl",
+                    name: titleClear(songInfo.title),
+                    artist: "",
+                });
+
+                if(connection.playerStatus === AudioPlayerStatus.Idle){
+                    skip(message.guild.id);
+                }
             }
         }
         else //error retrieving
@@ -675,23 +675,27 @@ async function addYoutubeUrlToQueue(url) {
 
         const results = await youtubesr.searchOne(url);
         songInfo = results;
-
+        
         if(songInfo) {
-            queue.push({
-                url: songInfo.id,
-                mode: "ytdl",
-                name: titleClear(songInfo.title),
-                artist: "",
-            });
-        }
+            const connection = connections.get(message.guild.id);
 
-        if(playerStatus == AudioPlayerStatus.Idle){
-            skip(); //cheaty code
+            if(connection) {
+                connection.queue.push
+                ({
+                    url: songInfo.id,
+                    mode: "ytdl",
+                    name: titleClear(songInfo.title),
+                    artist: "",
+                });
+    
+                if(connection.playerStatus === AudioPlayerStatus.Idle){
+                    skip(message.guild.id);
+                }
+            }
         }
         
     } catch (error) {
         console.log(error);
-        songInfo = null;
     }
 }
 
@@ -699,31 +703,36 @@ async function playYoutubePlaylist(message, url)
 {
     try {
         const isValid =  await ytpl.validateID(url);
-        console.log(isValid);
 
         if(isValid) {
             const playlistInfo = await ytpl(url);
 
             if(playlistInfo) {
-                message.channel.send(`${client.user.username}` + " has added " + "**" + `${playlistInfo.items.length}` + "**" + " songs");
-    
-                for (let i = 0; i < playlistInfo.items.length; i++) {
-                    const element = playlistInfo.items[i];
+                
+                const connection = connections.get(message.guild.id);
 
-                    queue.push({
-                        url: element.id,
-                        mode: "ytdl",
-                        name: titleClear(element.title),
-                        artist: "",
-                    });
-                }
+                if(connection) {
+
+                    for (let i = 0; i < playlistInfo.items.length; i++) {
+                        const element = playlistInfo.items[i];
     
-                if(playerStatus == AudioPlayerStatus.Idle){
-                    skip(); //cheaty code
-                    return;
+                        connection.queue.push
+                        ({
+                            url: songInfo.id,
+                            mode: "ytdl",
+                            name: titleClear(songInfo.title),
+                            artist: "",
+                        });
+                    }
+        
+                    if(connection.playerStatus === AudioPlayerStatus.Idle){
+                        skip(message.guild.id);
+                    }
+
+                    setEmbedAuthor(message.guild.id, true);
                 }
-    
-                setEmbedAuthor(true);
+
+                message.channel.send(`${client.user.username}` + " has added " + "**" + `${playlistInfo.items.length}` + "**" + " songs");
                 return;
             }
         }
@@ -740,10 +749,7 @@ async function playYoutubePlaylist(message, url)
 async function playIDFromMixURL(message, url) {
     try {
         const id = url.match(videoIdRegex)[0];
-        console.log(id);
-
         addYoutubeUrlToQueue(id);
-
     } catch (error) {
         console.log(error);
     }
@@ -758,40 +764,46 @@ async function playYoutubeMix(message, url) {
     console.log(mixPlaylist);
 }
 
-function setEmbedAuthor(updateMessage = false) {
-    if(pauseEnabled) {
-        baseEmbed.setAuthor({name:'Paused'})
+function setEmbedAuthor(guildId, updateMessage = false) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    if(connection.playerStatus === AudioPlayerStatus.Paused) {
+        connection.embed.setAuthor({name:'Paused'});
     }
     else {
-        if(loopEnabled) {
-            baseEmbed.setAuthor({name:'Looping'})
+        if(connection.features.loopEnabled) {
+            connection.embed.setAuthor({name:'Looping'});
         }
         else {
-            if(queue.length > 0) {
-                baseEmbed.setAuthor({name:`Songs left in Queue: ${queue.length}`});
+            if(connection.queue.length > 0) {
+                connection.embed.setAuthor({name:`Songs left in Queue: ${connection.queue.length}`});
             }
             else {
-                if(autoplayEnabled) {
-                    baseEmbed.setAuthor({name:'In Autoplay Mode'});
+                if(connection.features.autoplayEnabled) {
+                    connection.embed.setAuthor({name:'In Autoplay Mode'});
                 }
                 else {
-                    baseEmbed.setAuthor({name:''});
+                    connection.embed.setAuthor({name:''});
                 }
             }
         }    
     }
 
     if(updateMessage) {
-        if(currentPlayingMessage)
-            currentPlayingMessage.edit({ embeds: [baseEmbed] });
+        if(connection.message)
+            connection.message.edit({ embeds: [baseEmbed] });
     }
-
 }
 
-function updateMoreRow() {
+function updateMoreRow(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
     // disable clear button if queue length is 0
-    moreRow.components[clearButtonID].disabled = queue.length === 0;
+    connection.rowTwo.components[clearButtonID].disabled = connection.queue.length === 0;
 }
+
+// sql functions
 
 function addSongToDatabase(id, title, author, date) {
     if(!sqlEnabled) return;
@@ -869,12 +881,13 @@ function updateSongFavoritedDatabase(id) {
 }
 
 //takes url and fetches
-async function playSong(song) {
+async function playSong(guildId, song) {
     try {
-        console.log("playSong called", song);
+        const connection = connections.get(guildId);
+        if(!connection) return;
 
-        if(currentPlayingMessage) {
-            currentPlayingMessage.delete(); //delete current playing message
+        if(connection.message) {
+            connection.message.delete(); //delete current playing message
         } 
 
         setEmbedAuthor();
@@ -886,20 +899,21 @@ async function playSong(song) {
             const stream = await ytdl(song.url, { filter: "audioonly", highWaterMark: 1<<25 });
             const songInfo = await ytdl.getInfo(song.url);
 
+            connection.currentSong = song;
+
             console.log("play ytdl song", songInfo.videoDetails.title);
 
             // add song to list of played songs
-            addPlayedSong(songInfo.videoDetails.title);
+            addPlayedSong(guildId, songInfo.videoDetails.title);
 
             // update embed
-            baseEmbed.setTitle(songInfo.videoDetails.title);
-            baseEmbed.setFields({name: "Uploader:", value: songInfo.videoDetails.author.name},
+            // @TODO move this to function
+            connection.embed.setTitle(songInfo.videoDetails.title);
+            connection.embed.setFields({name: "Uploader:", value: songInfo.videoDetails.author.name},
                                 {name: "Song Duration:", value: hlprFncs.secondsToMinutes(songInfo.videoDetails.lengthSeconds)}); 
 
-            baseEmbed.setImage(songInfo.videoDetails.thumbnails[songInfo.videoDetails.thumbnails.length - 1].url);
-            baseEmbed.setURL(songInfo.videoDetails.video_url);
-
-            currentPlayingMessage = await channel.send({ embeds: [baseEmbed], components: [headerRow] });
+            connection.embed.setImage(songInfo.videoDetails.thumbnails[songInfo.videoDetails.thumbnails.length - 1].url);
+            connection.embed.setURL(songInfo.videoDetails.video_url);
 
             resource = createAudioResource(stream, { inputType: StreamType.Opus });
         }
@@ -910,30 +924,31 @@ async function playSong(song) {
 
             resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
 
-            let songInfo = await scdl.getInfo(song.url);
+            const songInfo = await scdl.getInfo(song.url);
 
-            baseEmbed.setTitle(songInfo.title);
-            baseEmbed.setFields({name: "Artist:", value: songInfo.user.username},
+            console.log("play scdl song", songInfo.title);
+
+            connection.embed.setTitle(songInfo.title);
+            connection.embed.setFields({name: "Artist:", value: songInfo.user.username},
                                 {name: "Genre:", value: songInfo.genre},
                                 {name: "Song Duration:", value: hlprFncs.millisecondsToMinutes(songInfo.duration)});
-            baseEmbed.setImage(songInfo.artwork_url);
-            baseEmbed.setURL(songInfo.permalink_url);
-
-            currentPlayingMessage = await channel.send({ embeds: [baseEmbed], components: [headerRow] });
+            connection.embed.setImage(songInfo.artwork_url);
+            connection.embed.setURL(songInfo.permalink_url);
         }        
+
+        connection.message = await connection.textChannel.send({ embeds: [connection.embed], components: [connection.rowOne] });
 
         try {
             //play the music
             if(resource) {
-                player.play(resource);
-                connection.subscribe(player);
-                currentSong = song;
-                playSongAttempts = 0;
+                connection.player.play(resource);
+                connection.connection.subscribe(connection.player);
+                playSongAttempts = 0; //@TODO move this
                 
                 return true;
             }
             else { //try again if failed for whatever reason
-                setTimeout(playSong, 500, song);
+                setTimeout(playSong, 500, guildId, song);
                 return false;
             }
         } catch (error) {
@@ -941,7 +956,7 @@ async function playSong(song) {
             {
                 console.log("error caught while attempting to play song again", error);
                 playSongAttempts ++;
-                setTimeout(playSong, 500, song);
+                setTimeout(playSong, 500, guildId, song);
             }
             else {
                 console.log("ran out of autoplay attempts", error);
@@ -955,7 +970,11 @@ async function playSong(song) {
     }
 }
 
-function addPlayedSong(title) {
+function addPlayedSong(guildId, title) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    const playedSongs = connection.playedSongs;
     title = titleClear(title);
 
     if(playedSongs.includes(title))
@@ -971,8 +990,13 @@ function addPlayedSong(title) {
 }
 
 //returns true if the song has likely been played already
-function checkForPlayedSong(name) {
+function checkForPlayedSong(guildId, name) {
     try {
+        const connection = connections.get(guildId);
+        if(!connection) return;
+
+        const playedSongs = connection.playedSongs;
+
         name = titleClear(name);
 
         for (let i = 0; i < playedSongs.length; i++) {
@@ -1000,208 +1024,239 @@ function checkForPlayedSong(name) {
     return false;
 }
 
-async function pause(sendMessage = false) {
-    if(playerStatus == AudioPlayerStatus.Playing) {
-        pauseEnabled = true;
-        headerRow.components[playButtonID].setLabel("Play");
-        headerRow.components[playButtonID].setStyle("SUCCESS");
+async function pause(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
 
-        player.pause();
+    if(connection.playerStatus === AudioPlayerStatus.Playing) {
+        connection.rowOne.components[playButtonID].setLabel("Play");
+        connection.rowOne.components[playButtonID].setStyle("SUCCESS");
 
-        if (sendMessage)
-            channel.send(`${client.user.username}` + ' is paused');
+        connection.player.pause();
     }
 }
 
-async function resume(sendMessage = false) {
-    if(playerStatus == AudioPlayerStatus.Paused) {
-        pauseEnabled = false;
-        headerRow.components[playButtonID].setLabel('Pause');
-        headerRow.components[playButtonID].setStyle("SECONDARY");
+async function resume(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
 
-        player.unpause();
-        if (sendMessage)
-            channel.send(`${client.user.username}` + ' is resumed');
+    if(connection.playerStatus === AudioPlayerStatus.Paused) {
+        connection.rowOne.components[playButtonID].setLabel('Pause');
+        connection.rowOne.components[playButtonID].setStyle("SECONDARY");
+
+        connection.player.unpause();
     }
 }
 
-async function loop(sendMessage = false) {
-    if(loopEnabled == false) {
-        moreRow.components[loopButtonID].setLabel("End Loop");
-        moreRow.components[loopButtonID].setStyle("SUCCESS");
-        loopEnabled = true;
+async function loop(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    if(connection.features.loopEnabled === false) {
+        connection.rowTwo.components[loopButtonID].setLabel("End Loop");
+        connection.rowTwo.components[loopButtonID].setStyle("SUCCESS");
+        connection.features.loopEnabled = true;
 
         return;
     }
 
-    if(loopEnabled == true) {
-        moreRow.components[loopButtonID].setLabel("Start Loop");
-        moreRow.components[loopButtonID].setStyle("SECONDARY");
-        loopEnabled = false;
+    if(connection.features.loopEnabled === true) {
+        connection.rowTwo.components[loopButtonID].setLabel("Start Loop");
+        connection.rowTwo.components[loopButtonID].setStyle("SECONDARY");
+        connection.features.loopEnabled = false;
 
         return;
     }
 }
 
-async function clear(sendMessage = false) {
-    if(queue.length > 0) {
-        queue.length = 0;
-        //row.components[clearButtonID].setDisabled(true);
-        if (sendMessage)
-            channel.send('Queue Cleared :(');
+async function clear(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    if(connection.queue.length > 0) {
+        connection.queue.length = 0;
     }
 }
 
-async function skip() {
-    if(queue.length == 0) {
-        if(autoplayEnabled) {
-            await resume();
+async function skip(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
 
-            if(!autoplaySongs[0])
-            {
-                await autoplaySelector(currentSong);
-            }
-            
-            if(autoplaySongs[0]) {
-                playSong(autoplaySongs[0]);
-                autoplaySongs.shift(); 
-            }
+    if(connection.queue.length === 0) {
+        if(connection.features.autoplayEnabled) {
+            await resume(guildId);
+            if(connection.autoplayQueue.length <= 1)
+                await autoplaySelector(guildId, connection.currentSong);
+
+            console.log("queue", connection.autoplayQueue);
+            const _song = connection.autoplayQueue.shift();
+            await playSong(guildId, _song);
         }
 
         return;
     }
     else
     {
-        await resume();
-        let _song = queue[0];
-        queue.shift();
-        await playSong(_song);
+        await resume(guildId);
+        const _song = connection.queue.shift();
+        await playSong(guildId, _song);
 
         return;
     }
 }
 
-async function autoplay() {
-    if(autoplayEnabled == false) {
-        headerRow.components[autoplayButtonID].setLabel("Disable Autoplay");
-        headerRow.components[autoplayButtonID].setStyle("SUCCESS");
-        autoplayEnabled = true;
+async function autoplay(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    if(connection.features.autoplayEnabled === false) {
+        connection.rowOne.components[autoplayButtonID].setLabel("Disable Autoplay");
+        connection.rowOne.components[autoplayButtonID].setStyle("SUCCESS");
+        connection.features.autoplayEnabled = true;
 
         return;
     }
 
-    if(autoplayEnabled == true) {
-        headerRow.components[autoplayButtonID].setLabel("Enable Autoplay");
-        headerRow.components[autoplayButtonID].setStyle("SECONDARY");
-        autoplayEnabled = false;
+    if(connection.features.autoplayEnabled === true) {
+        connection.rowOne.components[autoplayButtonID].setLabel("Enable Autoplay");
+        connection.rowOne.components[autoplayButtonID].setStyle("SECONDARY");
+        connection.features.autoplayEnabled = false;
 
         return;
     }
+}
+
+async function surpriseMe() {
+    if(!sqlEnabled) return;
+
+    const todayDate = hlprFncs.getSQLDate(new Date());
+
+    mySQLConnection.execute(
+        "INSERT INTO `paulbot_db`.`songs` (`idSong`, `nameSong`, `uploaderSong`, firstPlayedSong) values (?, ?, ?, ?)",
+        [id, title, author, date],
+        function(err, results, fields) {
+            if(err)
+                console.log("sql error caught", err);
+        }
+    );
+}
+
+function subscribeToPlayerEvents(guildId) {
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
+    const player = connection.player;
+
+    console.log("player found", player);
+
+    player.on(AudioPlayerStatus.Playing, () => {
+        console.log('The audio player has started playing!');
+        connection.playerStatus = AudioPlayerStatus.Playing;
+    });
+    
+    player.on(AudioPlayerStatus.Paused, () => {
+        console.log('The audio player has paused');
+        connection.playerStatus = AudioPlayerStatus.Paused;
+    });
+    
+    player.on("error", (error) => {
+        console.log(error);
+    });
+    
+    player.on(AudioPlayerStatus.Idle, () => {
+        if(connection.features.loopEnabled === true) {
+            try {
+                setTimeout(playSong, 500, guildId, currentSong);
+            } catch (error) {
+                console.log(error)
+            }
+            
+            return;
+        }
+    
+        if(connection.queue.length === 0) { //if theres no songs left in queue
+            //if we have autoplay
+            if(connection.features.autoplayEnabled) {
+                skip(guildId);
+            }
+            else {
+                console.log("idling state");
+                connection.playerStatus = AudioPlayerStatus.Idle;
+            }
+    
+            return;
+        }
+        else //if there are, play the next one
+        {
+            playSong(guildId, connection.queue[0]);
+            connection.queue.shift(); 
+    
+            return;
+        }
+    });
 }
 
 //EVENT METHODS
 
-player.on(AudioPlayerStatus.Playing, () => {
-	console.log('The audio player has started playing!');
-    playerStatus = AudioPlayerStatus.Playing;
-});
-
-player.on(AudioPlayerStatus.Paused, () => {
-    console.log('The audio player has paused');
-    playerStatus = AudioPlayerStatus.Paused;
-});
-
-player.on("error", (error) => {
-    console.log(error);
-});
-
 client.on("error", (error) => {
     console.log(error);
-});
-
-player.on(AudioPlayerStatus.Idle, () => {
-    if(loopEnabled == true) {
-        try {
-            setTimeout(playSong, 500, currentSong);
-        } catch (error) {
-            console.log(error)
-        }
-        
-        return;
-    }
-
-    if(queue.length == 0) { //if theres no songs left in queue
-        //if we have autoplay
-        if(autoplayEnabled) {
-            skip();
-        }
-        else {
-            console.log("idling state");
-            playerStatus = AudioPlayerStatus.Idle;
-        }
-
-        return;
-    }
-    else //if there are, play the next one
-    {
-        playSong(queue[0]);
-        queue.shift(); 
-
-        return;
-    }
 });
 
 //button interactions events
 client.on('interactionCreate', async interaction => {
 	if (!interaction.isButton()) return;
 
+    const guildId = interaction.guild.id;
+
+    const connection = connections.get(guildId);
+    if(!connection) return;
+
     if(interaction.customId == "play") { //if play/pause interaction invoked
-        if(playerStatus == AudioPlayerStatus.Paused) {
-            resume();
+        if(connection.playerStatus === AudioPlayerStatus.Paused) {
+            resume(guildId);
         }
         else {
-            pause();
+            pause(guildId);
         }
     }
 
     if(interaction.customId == "skip") { //if skip interaction invoked
-        skip();
+        skip(guildId);
         return;
     }
     
     if(interaction.customId == "autoplay") { //if autoplay
-        autoplay();
+        autoplay(guildId);
     }
 
     if(interaction.customId == "favorite") { //if song is favorited
         if(sqlEnabled) {
-            updateSongFavoritedDatabase(currentSong.url);
+            updateSongFavoritedDatabase(connection.currentSong.url);
         }
-        await interaction.user.send({ embeds: [baseEmbed] });
+        await interaction.user.send({ embeds: [connection.embed] });
         await interaction.reply({ content: 'finna slide in those DMs', ephemeral: true});
         return;
     }
 
     if(interaction.customId == "more") {
-        // await interaction.reply({ components: [moreRow], ephemeral: true });
-        updateMoreRow();
-        await interaction.update({ components: [moreRow] });
+        updateMoreRow(guildId);
+        await interaction.update({ components: [connection.rowTwo] });
         return;
     }
 
     if(interaction.customId == "loop") { //if loop interaction invoked
-        updateMoreRow();
-        loop();
-        setEmbedAuthor();
-        interaction.update({ embeds: [baseEmbed], components: [moreRow] });
+        updateMoreRow(guildId);
+        loop(guildId);
+        setEmbedAuthor(guildId);
+        interaction.update({ embeds: [connection.embed], components: [connection.rowTwo] });
         return;
     }
 
     if(interaction.customId == "clear") { //if clear
-        updateMoreRow();
+        updateMoreRow(guildId);
         // check for permissions to clear queue
         if(interaction.member.roles.cache.find(r => r.name === "DJ")) {
-            clear(true);
+            clear(guildId);
             await interaction.reply({ content: `Queue cleared by ${interaction.member.displayName}`});
         }
         else {
@@ -1211,13 +1266,13 @@ client.on('interactionCreate', async interaction => {
     }
 
     if(interaction.customId == "less") {
-        await interaction.update({ components: [headerRow] });
+        await interaction.update({ components: [connection.rowOne] });
         return;
     }
 
-    setEmbedAuthor();
+    setEmbedAuthor(guildId);
     // update our buttons to reflect changes
-    await interaction.update({ embeds: [baseEmbed], components: [headerRow] });
+    await interaction.update({ embeds: [connection.embed], components: [connection.rowOne] });
 });
 
 client.login(token);
